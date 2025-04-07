@@ -1,0 +1,41 @@
+{
+  "id": "/",
+  "short_name": "Oh Hey!",
+  "name": "Oh Hey!",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#5511AA",
+  "background_color": "#222222",
+  "icons": [
+    {
+      "src": "/favicon-36x36.png",
+      "sizes": "36x36",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "banner.png",
+      "sizes": "640x320",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Oh Hey!"
+    },
+    {
+      "src": "favicon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "label": "Oh Hey!"
+    }
+  ]
+}
