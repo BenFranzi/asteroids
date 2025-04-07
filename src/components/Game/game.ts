@@ -37,6 +37,10 @@ interface KeyboardVisitor {
   visitPlayer(player: Player): void;
 }
 
+interface TouchVisitor {
+  visitPlayer(player: Player): void;
+}
+
 interface Movement {
   accept(visitor: KeyboardVisitor): void;
 }
@@ -140,6 +144,10 @@ class Player implements Entity, Drawable, Movement {
     this.health = Math.max(0, this.health - .2);
   }
 
+  public heal(_asteroid: Asteroid): void {
+    this.health = Math.min(1, this.health + .01);
+  }
+
   public isAlive(): boolean {
     return this.health > 0;
   }
@@ -160,6 +168,10 @@ class Asteroid implements Entity, Drawable {
   position: Position;
   velocity: Position;
   color: string;
+  startTimestamp: number;
+  deathTimestamp: number | undefined;
+  fadeInDuration: number;
+  fadeOutDuration: number;
 
   static getRandomPosition(bounds: Dimensions): Position {
     return {
@@ -175,21 +187,26 @@ class Asteroid implements Entity, Drawable {
     };
   }
 
-  constructor(position: Position, velocity: Position) {
+  constructor(position: Position, velocity: Position, timestamp: number) {
     this.position = position;
     this.size = { width: 15, height: 15 };
     this.velocity = velocity;
     this.color = 'white';
+    this.fadeInDuration = 200;
+    this.fadeOutDuration = 2000;
+    this.startTimestamp = timestamp;
   }
 
-  public hit(): void {
+  public hit(timestamp: number): void {
     this.velocity = { x: 0, y: 0 };
     this.color = 'yellow';
+    this.deathTimestamp = timestamp;
   }
 
-  public intersectPlayer(): void {
+  public intersectPlayer(timestamp: number): void {
     this.velocity = { x: 0, y: 0 };
     this.color = 'green';
+    this.deathTimestamp = timestamp;
   }
 
   public accept(visitor: Visitor): Bullet | undefined {
@@ -205,13 +222,26 @@ class Asteroid implements Entity, Drawable {
     this.position.x += this.velocity.x * (deltaTime / 1000);
     this.position.y += this.velocity.y * (deltaTime / 1000);
   }
+
+  public getFade(timestamp: number): number {
+    if (!this.deathTimestamp) {
+      const elapsed = timestamp - this.startTimestamp;
+      return Math.min(elapsed / this.fadeInDuration, 1);
+    }
+
+    const elapsed = timestamp - this.deathTimestamp;
+    const fadeProgress = Math.min(elapsed / this.fadeOutDuration, 1);
+    return 1 - fadeProgress;
+  }
 }
 
 class CanvasDrawerVisitor implements CanvasVisitor {
   private ctx: CanvasRenderingContext2D;
+  private lastTime: number;
 
-  constructor(ctx: CanvasRenderingContext2D) {
+  constructor(ctx: CanvasRenderingContext2D, lastTime: number) {
     this.ctx = ctx;
+    this.lastTime = lastTime;
   }
 
   visitPlayer(player: Player): void {
@@ -242,6 +272,9 @@ class CanvasDrawerVisitor implements CanvasVisitor {
   visitAsteroid(asteroid: Asteroid): void {
     this.ctx.beginPath();
     this.ctx.fillStyle = asteroid.color;
+
+
+    this.ctx.globalAlpha = asteroid.getFade(this.lastTime);
     this.ctx.fillRect(
       asteroid.position.x,
       asteroid.position.y,
@@ -249,14 +282,9 @@ class CanvasDrawerVisitor implements CanvasVisitor {
       asteroid.size.height
     );
     this.ctx.stroke();
+    this.ctx.globalAlpha = 1;
   }
 }
-
-// class TerminalLoggerVisitor implements TerminalVisitor {
-//   visitPlayer(player: Player): void {
-//     console.log(`Player at (${player.position.x}, ${player.position.y}) - size (${player.size.width}x${player.size.height})`);
-//   }
-// }
 
 class KeyboardEventVisitor implements  KeyboardVisitor {
   keys: { [key: string]: boolean };
@@ -292,6 +320,48 @@ class KeyboardEventVisitor implements  KeyboardVisitor {
   }
 }
 
+class TouchEventVisitor implements TouchVisitor {
+  touchEvent?: TouchEvent;
+
+  constructor(touchEvent?: TouchEvent) {
+    this.touchEvent = touchEvent;
+  }
+
+  visitPlayer(player: Player): Bullet | undefined {
+    const [position, gun] = Array.from(this.touchEvent?.touches || []);
+    // Note: all the calculations here assume the canvas takes the fullscreen, some tweaks are needed to embed
+    const playerPosition = { x: position?.clientX, y: position?.clientY };
+    const gunPointedAt = { x: gun?.clientX, y: gun?.clientY };
+
+    let move: [number, number] = [0, 0];
+    if (position) {
+      const dx = playerPosition.x - player.position.x;
+      const dy = playerPosition.y - player.position.y;
+
+      const length = Math.hypot(dx, dy);
+      move = [dx / length, dy / length];
+    }
+    player.move(move);
+
+    let bullet: Bullet | undefined;
+    let direction: [number, number] = [0, 0];
+    if (gun) {
+      const gunDelta = {
+        x: gunPointedAt.x - player.position.x,
+        y: gunPointedAt.y - player.position.y,
+      };
+
+      const length = Math.hypot(gunDelta.x, gunDelta.y);
+      direction = [gunDelta.x / length, gunDelta.y / length];
+    }
+    if (direction[0] !== 0 || direction[1] !== 0) {
+      bullet = player.fire(direction);
+    }
+
+    return bullet;
+  }
+}
+
 export default class Game {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -300,61 +370,89 @@ export default class Game {
   bullets: Bullet[];
   asteroids: Asteroid[];
   destroyedAsteroid: Asteroid[];
+  dimensions: Dimensions;
+  isTouch: boolean;
+  destroyed: number;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = this.canvas.getContext('2d')!;
     const { width, height } = this.canvas;
+    this.dimensions = { width, height };
+    this.isTouch = false;
     this.player = new Player({ x: width / 2, y: height / 2 });
     this.lastTime = performance.now();
     this.bullets = [];
-    this.asteroids = Array.from({ length: 20 }).map(() => new Asteroid(
-      Asteroid.getRandomPosition({
-        width: this.canvas.width,
-        height: this.canvas.height,
-      }),
-      Asteroid.getRandomVelocity()
-    ));
+    this.asteroids = [];
     this.destroyedAsteroid = [];
+    this.destroyed = 0;
+    this.addAsteroids(10);
   }
 
-  initialState() {
-    const { width, height } = this.canvas;
-    this.player = new Player({ x: width / 2, y: height / 2 });
-    this.lastTime = performance.now();
-    this.bullets = [];
-    this.asteroids = Array.from({ length: 20 }).map(() => new Asteroid(
-      Asteroid.getRandomPosition({
-        width: this.canvas.width,
-        height: this.canvas.height,
-      }),
-      Asteroid.getRandomVelocity()
-    ));
-    this.destroyedAsteroid = [];
-  }
-
-  private restart() {
-    this.initialState();
-  }
-
-  tick(timestamp: number, keys: { [key: string]: boolean }): void {
+  public tick(timestamp: number, keys: { [key: string]: boolean }, touch?: TouchEvent): void {
     const deltaTime = timestamp - this.lastTime;
     this.lastTime = timestamp;
 
-    this.update(deltaTime, keys); // Note: update should be happening at a faster interval to paint
+    this.update(deltaTime, keys, touch);
     this.paint();
   }
 
-  private update(deltaTime: number, keys: { [key: string]: boolean }): void {
+  public resize({ width, height }: Dimensions): void {
+    this.dimensions = { width, height };
+    this.canvas.width = this.dimensions.width;
+    this.canvas.height = this.dimensions.height;
+  }
+
+  public setInputMode(isTouch: boolean): void {
+    this.isTouch = isTouch;
+  }
+
+  private restart(): void {
+    this.initialState();
+  }
+
+  private initialState(): void {
+    const { width, height } = this.dimensions;
+    this.player = new Player({ x: width / 2, y: height / 2 });
+    this.lastTime = performance.now();
+    this.bullets = [];
+    this.asteroids = [];
+    this.destroyedAsteroid = [];
+    this.destroyed = 0;
+    this.addAsteroids(10);
+  }
+
+  private addAsteroids(count: number): void {
+    this.asteroids.push(...Array.from({ length: count }).map(() => new Asteroid(
+      Asteroid.getRandomPosition({
+        width: this.canvas.width,
+        height: this.canvas.height,
+      }),
+      Asteroid.getRandomVelocity(),
+      this.lastTime
+    )));
+  }
+
+
+  private update(deltaTime: number, keys: { [key: string]: boolean }, touch?: TouchEvent): void {
     if (!this.player.isAlive()) {
-      if (keys['Enter']) {
+      if (keys['Enter'] || touch?.touches.length === 3) {
         this.restart();
       }
       return;
     }
 
-    const keyboardEventVisitor = new KeyboardEventVisitor(keys);
-    const newBullet = this.player.accept(keyboardEventVisitor);
+    if (touch) {
+      this.setInputMode(true);
+    }
+
+    if (Object.values(keys).some(Boolean)) {
+      this.setInputMode(false);
+    }
+
+    const inputEventVisitor = this.isTouch
+      ? new TouchEventVisitor(touch) : new KeyboardEventVisitor(keys);
+    const newBullet = this.player.accept(inputEventVisitor);
     if (newBullet) {
       this.bullets.push(newBullet);
     }
@@ -373,14 +471,17 @@ export default class Game {
         || bullet.position.y > this.canvas.height
       ));
 
+
+
     for (const bullet of this.bullets) {
       for (let i = this.asteroids.length - 1; i >= 0; i--) {
         const asteroid = this.asteroids[i];
         if (this.checkCollision(bullet, asteroid)) {
           this.asteroids.splice(i, 1);
+          this.player.heal(asteroid);
           this.destroyedAsteroid.push(asteroid);
-          asteroid.hit();
-          console.log({ health: this.player.health, isAlive: this.player.isAlive() });
+          ++this.destroyed;
+          asteroid.hit(this.lastTime);
         }
       }
     }
@@ -389,9 +490,10 @@ export default class Game {
     for (let i = this.asteroids.length - 1; i >= 0; i--) {
       const asteroid = this.asteroids[i];
       if (this.checkCollision(this.player, asteroid)) {
-        asteroid.intersectPlayer();
+        asteroid.intersectPlayer(this.lastTime);
         this.player.hit(asteroid);
         this.asteroids.splice(i, 1);
+        ++this.destroyed;
         this.destroyedAsteroid.push(asteroid);
       }
     }
@@ -400,21 +502,18 @@ export default class Game {
     this.asteroids.forEach(asteroid => asteroid.update(deltaTime));
 
     if (this.asteroids.length < 8) {
-      this.asteroids.push(...Array.from({ length: 20 }).map(() => new Asteroid(
-        Asteroid.getRandomPosition({
-          width: this.canvas.width,
-          height: this.canvas.height,
-        }),
-        Asteroid.getRandomVelocity()
-      )));
+      this.addAsteroids(10 * (1 + Math.floor(this.destroyed / 50)));
     }
   }
 
   private paintUI(): void {
-    const { height, width } = this.ctx.canvas;
+    const { height, width } = this.dimensions;
+
+
+    const topOffset = this.isTouch ? 20 : 0;
 
     // Health Bar
-    const padding = 10;
+    const padding = 10 + topOffset;
     const size = 5;
     this.ctx.beginPath();
     this.ctx.fillStyle = 'red';
@@ -430,7 +529,7 @@ export default class Game {
     this.ctx.fillStyle = 'white';
     this.ctx.textAlign = 'right';
     this.ctx.textBaseline = 'middle';
-    this.ctx.fillText(`${this.destroyedAsteroid.length} destroyed - health ${Math.ceil(this.player.health * 100)}%`, width - 15, 30);
+    this.ctx.fillText(`${this.destroyedAsteroid.length} destroyed - health ${Math.round(this.player.health * 100)}%`, width - 15, 30 + topOffset);
 
     // Game over screen
     if (!this.player.isAlive()) {
@@ -444,7 +543,8 @@ export default class Game {
       this.ctx.fillStyle = 'white';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'middle';
-      this.ctx.fillText('"Enter" to restart', width / 2, height / 2 + 48);
+      this.ctx.fillText(this.isTouch ? 'Touch with 3 fingers' : '"Enter"', width / 2, height / 2 + 48);
+      this.ctx.fillText('to restart', width / 2, height / 2 + 48 + 32);
     }
   }
 
@@ -468,7 +568,7 @@ export default class Game {
   private paint(): void {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    const canvasVisitor = new CanvasDrawerVisitor(this.ctx);
+    const canvasVisitor = new CanvasDrawerVisitor(this.ctx, this.lastTime);
 
     this.bullets.forEach(bullet => bullet.accept(canvasVisitor));
     this.asteroids.forEach(asteroid => asteroid.accept(canvasVisitor));
