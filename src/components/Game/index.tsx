@@ -87,7 +87,7 @@ const Game: FC = () => {
   }, []);
 
   return (
-    <canvas ref={ref} />
+    <canvas ref={ref} css={{ imageRendering: 'pixelated' }} />
   );
 };
 
